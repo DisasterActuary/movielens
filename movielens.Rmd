@@ -1,0 +1,196 @@
+---
+title: "Movielens Project"
+author: "Ricardo Morales"
+date: "2024-06-12"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+<style>
+body {
+text-align: justify}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+## 1. Introduction
+
+With the code provided, we get the **edx** data set, which contains information about the ratings of different  movies, featuring also additional information such as the movie genre, title and id for both the movie rated and the user who assigned the rating. Thus, this data set has **6** variables and slightly more than **9 million rows**. We also get a data set named **final_holdout_test** which we will only use to test our model.  
+
+```{r, echo=FALSE}
+options(timeout = 120)
+if(!require(tidyverse)) install.packages("tidyverse", repos = "http://cran.us.r-project.org")
+if(!require(caret)) install.packages("caret", repos = "http://cran.us.r-project.org")
+library(tidyverse)
+library(caret)
+dl <- "ml-10M100K.zip"
+if(!file.exists(dl))
+  download.file("https://files.grouplens.org/datasets/movielens/ml-10m.zip", dl)
+ratings_file <- "ml-10M100K/ratings.dat"
+if(!file.exists(ratings_file))
+  unzip(dl, ratings_file)
+movies_file <- "ml-10M100K/movies.dat"
+if(!file.exists(movies_file))
+  unzip(dl, movies_file)
+ratings <- as.data.frame(str_split(read_lines(ratings_file), fixed("::"), simplify = TRUE), stringsAsFactors = FALSE)
+colnames(ratings) <- c("userId", "movieId", "rating", "timestamp")
+ratings <- ratings %>%
+  mutate(userId = as.integer(userId),
+         movieId = as.integer(movieId),
+         rating = as.numeric(rating),
+         timestamp = as.integer(timestamp))
+movies <- as.data.frame(str_split(read_lines(movies_file), fixed("::"), 
+                                  simplify = TRUE), stringsAsFactors = FALSE)
+colnames(movies) <- c("movieId", "title", "genres")
+movies <- movies %>%
+  mutate(movieId = as.integer(movieId))
+movielens <- left_join(ratings, movies, by = "movieId")
+# Final hold-out test set
+set.seed(1, sample.kind="Rounding")
+test_index <- createDataPartition(y = movielens$rating, times = 1, p = 0.1, list = FALSE)
+edx <- movielens[-test_index,]
+temp <- movielens[test_index,]
+final_holdout_test <- temp %>% 
+  semi_join(edx, by = "movieId") %>%
+  semi_join(edx, by = "userId")
+removed <- anti_join(temp, final_holdout_test)
+edx <- rbind(edx, removed)
+rm(dl, ratings, movies, test_index, temp, movielens, removed)
+```
+
+Our goal is to develop an **algorithm** for predicting the movie ratings assigned by the many users considered in the data set. In order to do that, we take as our main reference the approach covered in class (more precisely in **Section 6** when we learnt the basics of **Recommendation Systems**).  
+
+Therefore, we keep the following equation in mind when designing our algorithm:  
+<br>
+$$Y_{u,i}=\mu+b_m+b_u$$
+<br>
+In this equation,$Y_{u,i}$ denotes the rating given to the movie _i_ by the user _u_,  $\mu$ represents the average of all ratings, $b_m$ is the _movie-specific effect_ and $b_u$ is the _user-specific effect_.  
+
+As prescribed, we will use only the **edx** data set to train our model (we will partition it in train and test sets, as recommended) and once we get confident enough with the results, we will apply the model estimated on the **final_holdout_test** data set.  
+
+## 2. Analysis
+
+We start by partitioning the **edx** data frame into a train set (which we will use, as its name indicates, to train our algorithm) and a test set (which we will employ to make a preliminary test of the algorithm). We do this in the following way. Notice that, as usual, the test set (**edx_test**) represents 10% of the observations considered in the train set (**edx_train**).  
+
+```{r, echo=FALSE}
+index <- createDataPartition(y = edx$rating, times = 1, p = 0.1, list = FALSE)
+edx_train <- edx[-index,]
+edx_test <- edx[index,]
+edx_test <- edx_test %>%
+  semi_join(edx_train, by = "movieId") %>%
+  semi_join(edx_train, by = "userId")
+```
+
+Next, we calculate the average rating for all the movies included in the train set. We do this using the following code in R:  
+
+```{r, echo=TRUE}
+mu <- mean(edx_train$rating)
+mu
+```
+<br>
+Then, we can check graphically that the ratings variability among movies and users included in the **edx** data set is significant and their distributions are skewed to the left.  
+<center>
+```{r, echo=FALSE}
+edx %>% 
+  group_by(movieId) %>% 
+  summarize(b_m = mean(rating)) %>%
+  ggplot(aes(b_m)) + 
+  geom_histogram(color = "black", fill = "green") +
+  ggtitle("Histogram of Movie-Specific Effects") +
+  theme(plot.title = element_text(hjust=0.5))
+```
+</center>
+<br>
+Then, we calculate the _movie-specific effects_ ($b_m$). In order to do that, we must first group the data by movieId. Hence, we obtain these effects as the average of $Y_{u,i}-\mu$. The corresponding R code is:  
+
+```{r, echo=TRUE}
+movie_avgs <- edx_train %>%
+  group_by(movieId) %>%
+  summarize(b_m = mean(rating-mu))
+```
+
+Next, we estimate the _user-specific effects_ ($b_u$). These coefficients can be calculated as the average of $Y_{u,i}-\mu-b_m$. The corresponding R code is:  
+
+```{r, echo=TRUE}
+user_avgs <- edx_train %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_m))
+```
+<br>
+<center>
+```{r, echo=FALSE}
+edx %>% 
+  group_by(userId) %>% 
+  summarize(b_u = mean(rating)) %>%
+  ggplot(aes(b_u)) + 
+  geom_histogram(color = "black", fill = "blue") +
+  ggtitle("Histogram of User-Specific Effects") +
+  theme(plot.title = element_text(hjust=0.5))
+```
+</center>
+<br>
+Finally, we obtain the predicted ratings according to the simple algorithm we have just developed based on the formula initially provided ($Y_{u,i}=\mu+b_m+b_u$). The respective piece of code in R is:  
+
+```{r, echo=TRUE}
+predicted_ratings <- edx_test %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pr = mu + b_m + b_u) %>%
+  pull(pr)
+```
+
+We run the following code in R and get a **Root-Mean-Square Error (RMSE)** equal to **0.865**.  
+
+```{r, echo=TRUE}
+model_rmse <- sqrt(mean((predicted_ratings-edx_test$rating)^2))
+model_rmse
+```
+Then, we can be confident enough to train the algorithm constructed on the entire **edx** data set and test it on the **final_holdout_test**. In other words, we replicate the procedure described before but using this larger data sets instead. The average movie rating is:  
+
+```{r, echo=TRUE}
+mu <- mean(edx$rating)
+mu
+```
+
+The movie-specific effects are calculated as follows:  
+
+```{r, echo=TRUE}
+movie_avgs <- edx %>%
+  group_by(movieId) %>%
+  summarize(b_m = mean(rating-mu))
+```
+
+On the other hand, the user-specific effects are obtained as:  
+
+```{r, echo=TRUE}
+user_avgs <- edx %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  group_by(userId) %>%
+  summarize(b_u = mean(rating - mu - b_m))
+```
+
+## 3. Results
+
+Finally, we calculate the predicted ratings according to the algorithm developed but this time using the **final_holdout_test** data set (we do this by comparing the ratings predicted by the algorithm to the values stored in the column _rating_ of the aforementioned data set).
+
+```{r, echo=TRUE}
+predicted_ratings <- final_holdout_test %>% 
+  left_join(movie_avgs, by='movieId') %>%
+  left_join(user_avgs, by='userId') %>%
+  mutate(pr = mu + b_m + b_u) %>%
+  pull(pr)
+```
+
+Hence, we calculate the corresponding **RMSE**. We find it takes a value of **0.865**.  
+
+```{r, echo=TRUE}
+model_rmse <- sqrt(mean((predicted_ratings-final_holdout_test$rating)^2))
+model_rmse
+```
+## 4. Conclusion
+To sum up, we are able to get a **RMSE** lower than 0.90 after constructing a simple algorithm that accounts for movie-specific and user-specific events. These effects were added to the average rating calculated on the whole **edx** data set. We could have improved our model by using techniques such as **Matrix Factorization** or **Singular Value Decomposition**, which are capable of identifying further patterns in the data.
